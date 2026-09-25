@@ -1,0 +1,101 @@
+name: SoulSign Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional tag, e.g. v0.1.0. Leave blank for artifact only.'
+        required: false
+        type: string
+
+concurrency:
+  group: soulsign-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Cache Rust toolchain and cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry
+            ~/.cargo/git
+            Vendor/Minimuxer/RustBridge/target
+          key: soulsign-rustbridge-${{ runner.os }}-${{ hashFiles('Vendor/Minimuxer/RustBridge/Cargo.lock') }}
+          restore-keys: |
+            soulsign-rustbridge-${{ runner.os }}-
+
+      - name: Select Xcode 26.5
+        run: |
+          test -d /Applications/Xcode_26.5.app
+          sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install Rust toolchain used by upstream
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview
+          rustup default 1.97.1
+
+      - name: Prepare upstream RustBridge
+        env:
+          RUST_TOOLCHAIN: 1.97.1
+        run: |
+          bash Scripts/audit-rustbridge-source.sh
+          bash Scripts/ensure-rustbridge.sh
+          bash Scripts/verify-rustbridge-symbols.sh
+
+      - name: Apply SoulSign icon
+        run: bash .soulsign-tools/install_icon.sh .
+
+      - name: Install XcodeGen 2.45.4
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.45.4/xcodegen.zip
+          echo "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned IPA
+        run: |
+          SEAL_IPA_CONFIGURATION=Release SEAL_SKIP_XCODEGEN=1 bash Scripts/build-unsigned-ipa.sh
+          bash Scripts/verify-ipa.sh build/Seal.ipa
+          cp build/Seal.ipa build/SoulSign.ipa
+          shasum -a 256 build/SoulSign.ipa | awk '{print $1 "  SoulSign.ipa"}' > build/SoulSign.ipa.sha256
+
+      - name: Upload SoulSign artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: SoulSign-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            build/SoulSign.ipa
+            build/SoulSign.ipa.sha256
+            build/Seal-Info.plist
+            build/SealTunnel-Info.plist
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/SoulSign.ipa build/SoulSign.ipa.sha256 --clobber
+          else
+            gh release create "$RELEASE_TAG" build/SoulSign.ipa build/SoulSign.ipa.sha256 \
+              --title "SoulSign $RELEASE_TAG" --generate-notes
+          fi
