@@ -4,8 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional tag, e.g. v0.1.0. Leave blank for artifact only.'
+        description: '可选：如 v0.1.0；留空只生成 Artifact'
         required: false
+        type: string
+      upstream_ref:
+        description: 'MJorb 分支或标签，默认 main'
+        required: false
+        default: 'main'
         type: string
 
 concurrency:
@@ -18,62 +23,112 @@ permissions:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6.0.2
+    timeout-minutes: 90
+    env:
+      SOULSIGN_SRC: ${{ runner.temp }}/SoulSign-src
+      MJORB_URL: https://github.com/dmjorb/MJorb.git
+      MJORB_REF: ${{ inputs.upstream_ref }}
 
-      - name: Cache Rust toolchain and cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.cargo/registry
-            ~/.cargo/git
-            Vendor/Minimuxer/RustBridge/target
-          key: soulsign-rustbridge-${{ runner.os }}-${{ hashFiles('Vendor/Minimuxer/RustBridge/Cargo.lock') }}
-          restore-keys: |
-            soulsign-rustbridge-${{ runner.os }}-
+    steps:
+      - name: Checkout SoulSign bootstrap repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Generate complete SoulSign source on GitHub runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf "$SOULSIGN_SRC"
+          bash "$GITHUB_WORKSPACE/bootstrap.sh" "$SOULSIGN_SRC"
+
+          # Optional user icon. The repository may be uploaded before soulsign.png exists.
+          if [ -f "$GITHUB_WORKSPACE/soulsign.png" ]; then
+            cp "$GITHUB_WORKSPACE/soulsign.png" "$SOULSIGN_SRC/soulsign.png"
+          fi
+
+          echo "Generated source: $SOULSIGN_SRC"
+          test -f "$SOULSIGN_SRC/project.yml"
+          test -f "$SOULSIGN_SRC/Scripts/audit-rustbridge-source.sh"
+          test -f "$SOULSIGN_SRC/Scripts/ensure-rustbridge.sh"
+          test -f "$SOULSIGN_SRC/Scripts/verify-rustbridge-symbols.sh"
+          test -f "$SOULSIGN_SRC/Scripts/build-unsigned-ipa.sh"
+          find "$SOULSIGN_SRC/Scripts" -maxdepth 1 -type f -print | sort
 
       - name: Select Xcode 26.5
+        shell: bash
         run: |
+          set -euxo pipefail
           test -d /Applications/Xcode_26.5.app
           sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
           xcodebuild -version
 
       - name: Install Rust toolchain used by upstream
+        shell: bash
         run: |
+          set -euxo pipefail
           rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview
           rustup default 1.97.1
+          rustc --version
+          cargo --version
 
       - name: Prepare upstream RustBridge
+        shell: bash
+        working-directory: ${{ env.SOULSIGN_SRC }}
         env:
           RUST_TOOLCHAIN: 1.97.1
         run: |
+          set -euxo pipefail
           bash Scripts/audit-rustbridge-source.sh
           bash Scripts/ensure-rustbridge.sh
           bash Scripts/verify-rustbridge-symbols.sh
 
       - name: Apply SoulSign icon
-        run: bash .soulsign-tools/install_icon.sh .
+        shell: bash
+        working-directory: ${{ env.SOULSIGN_SRC }}
+        run: |
+          set -euxo pipefail
+          bash .soulsign-tools/install_icon.sh .
 
       - name: Install XcodeGen 2.45.4
+        shell: bash
         run: |
+          set -euxo pipefail
           curl --fail --location --silent --show-error \
             --output "$RUNNER_TEMP/xcodegen.zip" \
             https://github.com/yonaskolb/XcodeGen/releases/download/2.45.4/xcodegen.zip
           echo "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
-          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
 
       - name: Generate Xcode project
-        run: xcodegen generate
-
-      - name: Build unsigned IPA
+        shell: bash
+        working-directory: ${{ env.SOULSIGN_SRC }}
         run: |
+          set -euxo pipefail
+          xcodegen generate
+
+      - name: Build unsigned SoulSign IPA
+        shell: bash
+        working-directory: ${{ env.SOULSIGN_SRC }}
+        run: |
+          set -euxo pipefail
           SEAL_IPA_CONFIGURATION=Release SEAL_SKIP_XCODEGEN=1 bash Scripts/build-unsigned-ipa.sh
           bash Scripts/verify-ipa.sh build/Seal.ipa
           cp build/Seal.ipa build/SoulSign.ipa
-          shasum -a 256 build/SoulSign.ipa | awk '{print $1 "  SoulSign.ipa"}' > build/SoulSign.ipa.sha256
+          (cd build && shasum -a 256 SoulSign.ipa | awk '{print $1 "  SoulSign.ipa"}' > SoulSign.ipa.sha256)
+
+      - name: Prepare downloadable artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf "$GITHUB_WORKSPACE/out"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$SOULSIGN_SRC/build/SoulSign.ipa" "$GITHUB_WORKSPACE/out/"
+          cp "$SOULSIGN_SRC/build/SoulSign.ipa.sha256" "$GITHUB_WORKSPACE/out/"
+          [ ! -f "$SOULSIGN_SRC/build/Seal-Info.plist" ] || cp "$SOULSIGN_SRC/build/Seal-Info.plist" "$GITHUB_WORKSPACE/out/"
+          [ ! -f "$SOULSIGN_SRC/build/SealTunnel-Info.plist" ] || cp "$SOULSIGN_SRC/build/SealTunnel-Info.plist" "$GITHUB_WORKSPACE/out/"
+
+          # Keep corresponding generated source available with releases/artifacts.
+          ditto -c -k --sequesterRsrc --keepParent "$SOULSIGN_SRC" "$GITHUB_WORKSPACE/out/SoulSign-source.zip"
 
       - name: Upload SoulSign artifact
         uses: actions/upload-artifact@v7.0.1
@@ -81,21 +136,24 @@ jobs:
           name: SoulSign-${{ github.run_number }}
           if-no-files-found: error
           path: |
-            build/SoulSign.ipa
-            build/SoulSign.ipa.sha256
-            build/Seal-Info.plist
-            build/SealTunnel-Info.plist
+            out/SoulSign.ipa
+            out/SoulSign.ipa.sha256
+            out/SoulSign-source.zip
+            out/*-Info.plist
           retention-days: 30
 
       - name: Publish GitHub Release
         if: ${{ inputs.release_tag != '' }}
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          set -euxo pipefail
+          FILES=(out/SoulSign.ipa out/SoulSign.ipa.sha256 out/SoulSign-source.zip)
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" build/SoulSign.ipa build/SoulSign.ipa.sha256 --clobber
+            gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber
           else
-            gh release create "$RELEASE_TAG" build/SoulSign.ipa build/SoulSign.ipa.sha256 \
+            gh release create "$RELEASE_TAG" "${FILES[@]}" \
               --title "SoulSign $RELEASE_TAG" --generate-notes
           fi
