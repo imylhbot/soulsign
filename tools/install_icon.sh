@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 ROOT="${1:-.}"
 ICON="$ROOT/soulsign.png"
 
@@ -20,6 +21,7 @@ if [[ -z "$APPICON_DIR" ]]; then
   mkdir -p "$APPICON_DIR"
 fi
 
+# Validate the source image when Pillow happens to be available. Pillow is optional.
 python3 - "$ICON" <<'PY'
 import sys
 from pathlib import Path
@@ -27,30 +29,41 @@ try:
     from PIL import Image
 except Exception:
     sys.exit(0)
-p=Path(sys.argv[1])
-im=Image.open(p)
+p = Path(sys.argv[1])
+im = Image.open(p)
 if im.width != im.height:
     raise SystemExit("soulsign.png must be square")
 if im.width < 1024:
     print("warning: soulsign.png is smaller than 1024x1024; release icon quality may be reduced")
 PY
 
-# Generate all common iPhone/iPad icon raster sizes using macOS built-in sips.
-declare -A SIZES=(
-  [icon-20@2x.png]=40 [icon-20@3x.png]=60
-  [icon-29@2x.png]=58 [icon-29@3x.png]=87
-  [icon-40@2x.png]=80 [icon-40@3x.png]=120
-  [icon-60@2x.png]=120 [icon-60@3x.png]=180
-  [icon-20-ipad.png]=20 [icon-20@2x-ipad.png]=40
-  [icon-29-ipad.png]=29 [icon-29@2x-ipad.png]=58
-  [icon-40-ipad.png]=40 [icon-40@2x-ipad.png]=80
-  [icon-76-ipad.png]=76 [icon-76@2x-ipad.png]=152
-  [icon-83.5@2x-ipad.png]=167 [icon-1024.png]=1024
-)
-for file in "${!SIZES[@]}"; do
-  px="${SIZES[$file]}"
-  sips -s format png -z "$px" "$px" "$ICON" --out "$APPICON_DIR/$file" >/dev/null
-done
+# GitHub macOS runners still invoke Apple's /bin/bash 3.2 in some contexts.
+# Bash 3.2 does not support associative arrays (`declare -A`), so keep this
+# deliberately compatible with Bash 3.2 and generate each raster explicitly.
+resize_icon() {
+  local filename="$1"
+  local pixels="$2"
+  sips -s format png -z "$pixels" "$pixels" "$ICON" --out "$APPICON_DIR/$filename" >/dev/null
+}
+
+resize_icon "icon-20@2x.png" 40
+resize_icon "icon-20@3x.png" 60
+resize_icon "icon-29@2x.png" 58
+resize_icon "icon-29@3x.png" 87
+resize_icon "icon-40@2x.png" 80
+resize_icon "icon-40@3x.png" 120
+resize_icon "icon-60@2x.png" 120
+resize_icon "icon-60@3x.png" 180
+resize_icon "icon-20-ipad.png" 20
+resize_icon "icon-20@2x-ipad.png" 40
+resize_icon "icon-29-ipad.png" 29
+resize_icon "icon-29@2x-ipad.png" 58
+resize_icon "icon-40-ipad.png" 40
+resize_icon "icon-40@2x-ipad.png" 80
+resize_icon "icon-76-ipad.png" 76
+resize_icon "icon-76@2x-ipad.png" 152
+resize_icon "icon-83.5@2x-ipad.png" 167
+resize_icon "icon-1024.png" 1024
 
 cat > "$APPICON_DIR/Contents.json" <<'JSON'
 {

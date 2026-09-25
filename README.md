@@ -43,3 +43,8 @@ instead of the removed/nonexistent `overlay/.github/...` path.
 ## v5 build stability
 
 The default MJorb source is pinned to commit `4c24fda2c97f8d275b748ba069a9af0ba89b62d2`. This makes builds reproducible instead of silently following upstream `main`. The direct-sign capacity guard now patches by function entry and degrades to a warning if upstream renames that helper; the primary 3-app account-pool allocator remains active.
+
+
+## v6 修复
+- 修复 macOS 系统 Bash 3.2 不支持 `declare -A` 关联数组导致的 `icon: unbound variable`。
+- 图标生成脚本现兼容 Bash 3.2；没有 `soulsign.png` 时会安全跳过。
