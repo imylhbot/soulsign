@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import pathlib
+import re
+import sys
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected exactly 1 match, found {count}")
+    return text.replace(old, new, 1)
+
+
+def patch_project(repo: pathlib.Path, minimum_ios: str) -> None:
+    path = repo / "project.yml"
+    text = path.read_text(encoding="utf-8")
+
+    # Keep internal target/scheme names as Seal for upstream build-script compatibility.
+    text = replace_once(text, "CFBundleDisplayName: Seal", "CFBundleDisplayName: SoulSign", "display name")
+    text = text.replace("com.mjorb.seal", "com.soulsign.app")
+    text = text.replace("NSLocalNetworkUsageDescription: Seal 通过本地通道连接此设备并安装应用。",
+                        "NSLocalNetworkUsageDescription: SoulSign 通过本地通道连接此设备并安装应用。")
+
+    # Add SoulSign URL scheme while retaining sidestore compatibility.
+    text = text.replace(
+        "              - seal\n              - sidestore",
+        "              - soulsign\n              - seal\n              - sidestore",
+        1,
+    )
+
+    # BackgroundTasks configuration is needed for the best-effort renewal scheduler.
+    marker = "        ITSAppUsesNonExemptEncryption: false\n"
+    if "BGTaskSchedulerPermittedIdentifiers:" not in text:
+        insertion = (
+            marker
+            + "        BGTaskSchedulerPermittedIdentifiers:\n"
+            + "          - com.soulsign.app.autorenew\n"
+            + "        UIBackgroundModes:\n"
+            + "          - fetch\n"
+        )
+        text = replace_once(text, marker, insertion, "Info.plist background task insertion")
+
+    # Upstream currently targets iOS 16. Lowering the deployment target is optional and
+    # intentionally explicit because current AnisetteKit requires iOS 15 and the UI may
+    # contain APIs introduced after iOS 14.
+    if minimum_ios != "16.0":
+        if minimum_ios not in {"15.0"}:
+            raise RuntimeError(
+                "SoulSign bootstrap currently allows stable 16.0 or experimental 15.0. "
+                "iOS 14 needs an Anisette/UI compatibility port; see IOS14_COMPATIBILITY.md."
+            )
+        text = text.replace('iOS: "16.0"', f'iOS: "{minimum_ios}"')
+        text = text.replace('deploymentTarget: "16.0"', f'deploymentTarget: "{minimum_ios}"')
+
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_apps_view_model(repo: pathlib.Path) -> None:
+    path = repo / "Seal/Features/Apps/AppsViewModel.swift"
+    text = path.read_text(encoding="utf-8")
+
+    # Make the existing launch check also run the SoulSign 24h threshold scan.
+    old_launch = """    func performLightweightLaunchCheck() async {\n        await load(force: true)\n    }\n"""
+    new_launch = """    func performLightweightLaunchCheck() async {\n        await load(force: true)\n        soulSignAutoRenewIfNeededForeground()\n    }\n"""
+    text = replace_once(text, old_launch, new_launch, "launch auto-renew hook")
+
+    old_block = """    private func continueSigningRequest(\n        for app: AppRecord,\n        availableAccounts: [AppleAccountRecord]\n    ) {\n        if app.belongsInInstalledList {\n            guard let accountID = app.accountID,\n                  let account = availableAccounts.first(where: { $0.id == accountID }) else {\n                alertFailure = ImportFailure(\n                    title: \"签名账号不可用\",\n                reason: \"上次签名这个应用的 Apple ID 已被删除或凭据失效。\",\n                recovery: \"在「我的」中重新添加原 Apple ID，或用当前账号重新签名安装\",\n                    code: \"SEAL-AUTH-104c\"\n                )\n                return\n            }\n            startSigning(app: app, account: account)\n        } else if let activeAccountID,\n                  let account = availableAccounts.first(where: { $0.id == activeAccountID }) {\n            startSigning(app: app, account: account)\n        } else if availableAccounts.count == 1, let account = availableAccounts.first {\n            startSigning(app: app, account: account)\n        } else {\n            accountSelectionApp = app\n        }\n    }\n"""
+
+    new_block = """    // MARK: - SoulSign account pool\n\n    private static let soulSignMaxAppsPerAccount = 3\n    private static let soulSignLastAssignedAccountKey = \"soulsign.accountPool.lastAssignedAccountID\"\n\n    private func soulSignAssignedAppCount(for accountID: UUID) -> Int {\n        installedApps.filter { app in\n            app.isSeal == false && app.accountID == accountID\n        }.count\n    }\n\n    private func soulSignAccountHasCapacity(_ account: AppleAccountRecord) -> Bool {\n        soulSignAssignedAppCount(for: account.id) < Self.soulSignMaxAppsPerAccount\n    }\n\n    private func soulSignRememberAssignedAccount(_ id: UUID) {\n        UserDefaults.standard.set(id.uuidString, forKey: Self.soulSignLastAssignedAccountKey)\n    }\n\n    private func soulSignAutomaticAccount(from availableAccounts: [AppleAccountRecord]) -> AppleAccountRecord? {\n        let accountsWithCapacity = availableAccounts.filter(soulSignAccountHasCapacity)\n        guard accountsWithCapacity.isEmpty == false else { return nil }\n\n        // First balance by current top-level app count. Among equally used accounts,\n        // continue after the previously assigned account to provide deterministic rotation.\n        let minimumCount = accountsWithCapacity\n            .map { soulSignAssignedAppCount(for: $0.id) }\n            .min() ?? 0\n        let leastUsedIDs = Set(accountsWithCapacity.filter {\n            soulSignAssignedAppCount(for: $0.id) == minimumCount\n        }.map(\\.id))\n\n        let lastID = UserDefaults.standard\n            .string(forKey: Self.soulSignLastAssignedAccountKey)\n            .flatMap(UUID.init(uuidString:))\n\n        if let lastID, let lastIndex = availableAccounts.firstIndex(where: { $0.id == lastID }) {\n            for offset in 1...availableAccounts.count {\n                let candidate = availableAccounts[(lastIndex + offset) % availableAccounts.count]\n                if leastUsedIDs.contains(candidate.id), soulSignAccountHasCapacity(candidate) {\n                    return candidate\n                }\n            }\n        }\n\n        return accountsWithCapacity.first(where: { leastUsedIDs.contains($0.id) })\n    }\n\n    private func soulSignCapacityFailure() -> ImportFailure {\n        ImportFailure(\n            title: \"Apple ID 配额已满\",\n            reason: \"当前所有可用 Apple ID 都已由 SoulSign 分配了 3 个 IPA。\",\n            recovery: \"添加新的 Apple ID，或移除不再使用的已签名应用\",\n            code: \"SOUL-POOL-003\"\n        )\n    }\n\n    private func continueSigningRequest(\n        for app: AppRecord,\n        availableAccounts: [AppleAccountRecord]\n    ) {\n        if app.belongsInInstalledList {\n            // Renewal never rotates an existing app to a different ID automatically.\n            guard let accountID = app.accountID,\n                  let account = availableAccounts.first(where: { $0.id == accountID }) else {\n                alertFailure = ImportFailure(\n                    title: \"签名账号不可用\",\n                    reason: \"上次签名这个应用的 Apple ID 已被删除或凭据失效。\",\n                    recovery: \"在「我的」中重新添加原 Apple ID，或手动选择账号重新签名安装\",\n                    code: \"SEAL-AUTH-104c\"\n                )\n                return\n            }\n            startSigning(app: app, account: account)\n            return\n        }\n\n        guard let account = soulSignAutomaticAccount(from: availableAccounts) else {\n            alertFailure = soulSignCapacityFailure()\n            return\n        }\n        soulSignRememberAssignedAccount(account.id)\n        Task { [weak self] in await self?.selectActiveAccount(id: account.id) }\n        startSigning(app: app, account: account)\n    }\n"""
+    text = replace_once(text, old_block, new_block, "account-pool allocator")
+
+    # Enforce the 3-app policy even if another UI path passes a new app/account directly.
+    old_guard = """        guard let account = verifiedAccounts.first(where: { $0.id == resolvedAccountID }) else {\n            alertFailure = ImportFailure(\n"""
+    new_guard = """        guard let account = verifiedAccounts.first(where: { $0.id == resolvedAccountID }) else {\n            alertFailure = ImportFailure(\n"""
+    # We insert after the complete availability guard, not inside it.
+    availability_tail = """            return\n        }\n        if isRenewal == false {\n            await selectActiveAccount(id: account.id)\n        }\n"""
+    capacity_tail = """            return\n        }\n        if isRenewal == false, app.isSeal == false, soulSignAccountHasCapacity(account) == false {\n            alertFailure = soulSignCapacityFailure()\n            return\n        }\n        if isRenewal == false {\n            soulSignRememberAssignedAccount(account.id)\n            await selectActiveAccount(id: account.id)\n        }\n"""
+    text = replace_once(text, availability_tail, capacity_tail, "direct-sign capacity guard")
+
+    # Manual account picker must also honor capacity for a new app.
+    old_select = """    func selectAccount(_ account: AppleAccountRecord, for app: AppRecord) {\n        accountSelectionApp = nil\n        Task { [weak self] in\n"""
+    new_select = """    func selectAccount(_ account: AppleAccountRecord, for app: AppRecord) {\n        if app.belongsInInstalledList == false, app.isSeal == false, soulSignAccountHasCapacity(account) == false {\n            accountSelectionApp = nil\n            alertFailure = soulSignCapacityFailure()\n            return\n        }\n        if app.belongsInInstalledList == false {\n            soulSignRememberAssignedAccount(account.id)\n        }\n        accountSelectionApp = nil\n        Task { [weak self] in\n"""
+    text = replace_once(text, old_select, new_select, "manual picker capacity guard")
+
+    # Insert foreground/background renewal helpers immediately before the existing refreshAll.
+    marker = """    func refreshAll() {\n        startBatchRefresh()\n    }\n"""
+    renewal_helpers = """    // MARK: - SoulSign expiration / automatic renewal\n\n    private func soulSignHasAppExpiring(within hours: Double = 24, now: Date = Date()) -> Bool {\n        let deadline = now.addingTimeInterval(hours * 60 * 60)\n        return installedApps.contains { app in\n            guard app.isSeal == false, app.accountID != nil, let expiry = app.expiryDate else { return false }\n            return expiry <= deadline\n        }\n    }\n\n    func soulSignAutoRenewIfNeededForeground() {\n        guard soulSignHasAppExpiring(), batchRefreshTask == nil, signingTask == nil else { return }\n        startBatchRefresh()\n    }\n\n    /// Called by BGAppRefreshTask. iOS decides whether/when this task gets CPU time.\n    /// The existing batch-renewal path intentionally disables interactive 2FA, so this\n    /// only succeeds when saved Apple ID sessions and the local install channel are usable.\n    @discardableResult\n    func soulSignAutoRenewInBackground() async -> Bool {\n        await load(force: true)\n        guard soulSignHasAppExpiring() else { return true }\n        guard batchRefreshTask == nil, signingTask == nil, renewalCoordinator != nil else { return false }\n        guard await refreshSigningChannel() else { return false }\n\n        batchRefreshSession = BatchRefreshSession()\n        await runBatchRefresh()\n\n        guard let status = batchRefreshSession?.status else { return false }\n        switch status {\n        case .completed(let result):\n            return result.failed == 0\n        case .preparing, .running, .preparingSealUpdate, .failed:\n            return false\n        }\n    }\n\n""" + marker
+    text = replace_once(text, marker, renewal_helpers, "auto renewal helpers")
+
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_app_entry(repo: pathlib.Path) -> None:
+    path = repo / "Seal/App/SealApp.swift"
+    text = path.read_text(encoding="utf-8")
+
+    text = replace_once(text, "import SwiftUI\n", "import SwiftUI\nimport BackgroundTasks\n", "BackgroundTasks import")
+    text = replace_once(
+        text,
+        "    private let notificationPresenter: SealNotificationPresenter\n",
+        "    private let notificationPresenter: SealNotificationPresenter\n    private let soulSignBackgroundRenewal: SoulSignBackgroundRenewal\n",
+        "background renewal property",
+    )
+    old_init = """        self.notificationPresenter = notificationPresenter\n        container = AppContainer.live()\n    }\n"""
+    new_init = """        self.notificationPresenter = notificationPresenter\n        let container = AppContainer.live()\n        self.container = container\n\n        let backgroundRenewal = SoulSignBackgroundRenewal(appsViewModel: container.appsViewModel)\n        self.soulSignBackgroundRenewal = backgroundRenewal\n        backgroundRenewal.register()\n        backgroundRenewal.schedule()\n    }\n"""
+    text = replace_once(text, old_init, new_init, "background renewal init")
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_readme(repo: pathlib.Path) -> None:
+    path = repo / "README.md"
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    banner = """> **SoulSign fork** — this repository is derived from MJorb/Seal (AGPL-3.0). SoulSign adds Apple-ID pooling (3 user IPAs per ID), automatic account rotation, 24-hour expiry renewal policy, background refresh scheduling, and SoulSign branding. Upstream notices are retained below.\n\n"""
+    if not text.startswith("> **SoulSign fork**"):
+        text = banner + text
+    path.write_text(text, encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--minimum-ios", default="16.0")
+    args = parser.parse_args()
+    repo = pathlib.Path(args.repo).resolve()
+
+    for required in [repo / "project.yml", repo / "Seal/Features/Apps/AppsViewModel.swift", repo / "Seal/App/SealApp.swift"]:
+        if not required.exists():
+            raise RuntimeError(f"required upstream file not found: {required}")
+
+    patch_project(repo, args.minimum_ios)
+    patch_apps_view_model(repo)
+    patch_app_entry(repo)
+    patch_readme(repo)
+    print("SoulSign patch applied successfully")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"SoulSign patch failed: {exc}", file=sys.stderr)
+        raise
