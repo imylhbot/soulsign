@@ -27,7 +27,12 @@ mkdir -p "$TARGET_DIR/.soulsign-tools"
 cp "$SCRIPT_DIR/tools/apply_soulsign.py" "$TARGET_DIR/.soulsign-tools/"
 cp "$SCRIPT_DIR/tools/install_icon.sh" "$TARGET_DIR/.soulsign-tools/"
 cp "$SCRIPT_DIR/overlay/SoulSign/SoulSignBackgroundRenewal.swift" "$TARGET_DIR/Seal/App/"
-cp "$SCRIPT_DIR/overlay/.github/workflows/soulsign-build.yml" "$TARGET_DIR/.github/workflows/"
+mkdir -p "$TARGET_DIR/.github/workflows"
+if [[ ! -f "$SCRIPT_DIR/.github/workflows/soulsign-build.yml" ]]; then
+  echo "error: missing SoulSign workflow: $SCRIPT_DIR/.github/workflows/soulsign-build.yml" >&2
+  exit 3
+fi
+cp "$SCRIPT_DIR/.github/workflows/soulsign-build.yml" "$TARGET_DIR/.github/workflows/soulsign-build.yml"
 cp "$SCRIPT_DIR/docs/IOS14_COMPATIBILITY.md" "$TARGET_DIR/IOS14_COMPATIBILITY.md"
 cp "$SCRIPT_DIR/docs/SECURITY.md" "$TARGET_DIR/SOULSIGN_SECURITY.md"
 

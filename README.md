@@ -26,3 +26,8 @@ GitHub Actions 会自动：
 ## 注意
 
 如果 Actions 在第一步 `git clone https://github.com/dmjorb/MJorb.git` 报错，说明上游仓库地址、访问权限或分支发生变化；这和 Windows Git/bash 无关。
+
+## v3 bootstrap fix
+
+The bootstrap now copies the workflow from `.github/workflows/soulsign-build.yml`
+instead of the removed/nonexistent `overlay/.github/...` path.
