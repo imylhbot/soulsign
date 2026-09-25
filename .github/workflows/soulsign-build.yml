@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: '可选：如 v0.1.0；留空只生成 Artifact'
+        description: '可选：如 v0.1.0；留空自动使用 build-运行编号 并发布 Release'
         required: false
         type: string
       upstream_ref:
@@ -40,7 +40,6 @@ jobs:
           rm -rf "$SOULSIGN_SRC"
           bash "$GITHUB_WORKSPACE/bootstrap.sh" "$SOULSIGN_SRC"
 
-          # Optional user icon. The repository may be uploaded before soulsign.png exists.
           if [ -f "$GITHUB_WORKSPACE/soulsign.png" ]; then
             cp "$GITHUB_WORKSPACE/soulsign.png" "$SOULSIGN_SRC/soulsign.png"
           fi
@@ -51,7 +50,23 @@ jobs:
           test -f "$SOULSIGN_SRC/Scripts/ensure-rustbridge.sh"
           test -f "$SOULSIGN_SRC/Scripts/verify-rustbridge-symbols.sh"
           test -f "$SOULSIGN_SRC/Scripts/build-unsigned-ipa.sh"
-          find "$SOULSIGN_SRC/Scripts" -maxdepth 1 -type f -print | sort
+
+      # Archive source BEFORE compiling Rust/Xcode. This keeps Cargo target,
+      # DerivedData and build products out of the corresponding-source archive.
+      - name: Archive clean SoulSign source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf "$GITHUB_WORKSPACE/out"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          SOURCE_PARENT="$(dirname "$SOULSIGN_SRC")"
+          SOURCE_NAME="$(basename "$SOULSIGN_SRC")"
+          (
+            cd "$SOURCE_PARENT"
+            zip -qry "$GITHUB_WORKSPACE/out/SoulSign-source.zip" "$SOURCE_NAME" \
+              -x '*/.git/*' '*/build/*' '*/DerivedData/*' '*/target/*' '*/.build/*'
+          )
+          du -h "$GITHUB_WORKSPACE/out/SoulSign-source.zip"
 
       - name: Select Xcode 26.5
         shell: bash
@@ -69,6 +84,20 @@ jobs:
           rustup default 1.97.1
           rustc --version
           cargo --version
+
+      # Cache Cargo downloads and RustBridge compilation output. The first build
+      # can still take a while; later builds on the same upstream/toolchain should
+      # normally reuse most Rust work.
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            /tmp/SoulSign-src/Vendor/Minimuxer/RustBridge/target
+          key: soulsign-rust-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
+          restore-keys: |
+            soulsign-rust-${{ runner.os }}-1.97.1-
 
       - name: Prepare upstream RustBridge
         shell: bash
@@ -116,44 +145,70 @@ jobs:
           cp build/Seal.ipa build/SoulSign.ipa
           (cd build && shasum -a 256 SoulSign.ipa | awk '{print $1 "  SoulSign.ipa"}' > SoulSign.ipa.sha256)
 
-      - name: Prepare downloadable artifacts
+          echo "===== Final IPA size ====="
+          du -h build/SoulSign.ipa
+          stat -f 'SoulSign.ipa exact bytes: %z' build/SoulSign.ipa
+          echo "=========================="
+
+      - name: Prepare IPA artifact files
         shell: bash
         run: |
           set -euxo pipefail
-          rm -rf "$GITHUB_WORKSPACE/out"
-          mkdir -p "$GITHUB_WORKSPACE/out"
           cp "$SOULSIGN_SRC/build/SoulSign.ipa" "$GITHUB_WORKSPACE/out/"
           cp "$SOULSIGN_SRC/build/SoulSign.ipa.sha256" "$GITHUB_WORKSPACE/out/"
           [ ! -f "$SOULSIGN_SRC/build/Seal-Info.plist" ] || cp "$SOULSIGN_SRC/build/Seal-Info.plist" "$GITHUB_WORKSPACE/out/"
           [ ! -f "$SOULSIGN_SRC/build/SealTunnel-Info.plist" ] || cp "$SOULSIGN_SRC/build/SealTunnel-Info.plist" "$GITHUB_WORKSPACE/out/"
 
-          # Keep corresponding generated source available with releases/artifacts.
-          ditto -c -k --sequesterRsrc --keepParent "$SOULSIGN_SRC" "$GITHUB_WORKSPACE/out/SoulSign-source.zip"
+          echo "===== Files prepared ====="
+          du -h "$GITHUB_WORKSPACE/out/"* || true
 
-      - name: Upload SoulSign artifact
+      # Actions artifact is intentionally IPA-only. The source archive is attached
+      # to the GitHub Release instead, so downloading the artifact does not mean
+      # downloading hundreds of MB of source/build data.
+      - name: Upload SoulSign IPA artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: SoulSign-${{ github.run_number }}
           if-no-files-found: error
+          compression-level: 0
           path: |
             out/SoulSign.ipa
             out/SoulSign.ipa.sha256
-            out/SoulSign-source.zip
             out/*-Info.plist
           retention-days: 30
 
+      - name: Resolve Release tag
+        id: release_meta
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED_TAG" ]; then
+            TAG="$REQUESTED_TAG"
+          else
+            TAG="build-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "SoulSign will publish Release tag: $TAG"
+
       - name: Publish GitHub Release
-        if: ${{ inputs.release_tag != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
         run: |
           set -euxo pipefail
-          FILES=(out/SoulSign.ipa out/SoulSign.ipa.sha256 out/SoulSign-source.zip)
+          FILES=(
+            out/SoulSign.ipa
+            out/SoulSign.ipa.sha256
+            out/SoulSign-source.zip
+          )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber
           else
             gh release create "$RELEASE_TAG" "${FILES[@]}" \
-              --title "SoulSign $RELEASE_TAG" --generate-notes
+              --title "SoulSign $RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --generate-notes
           fi
