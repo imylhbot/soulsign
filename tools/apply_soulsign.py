@@ -133,18 +133,43 @@ def patch_apps_view_model(repo: pathlib.Path) -> None:
     new_block = """    // MARK: - SoulSign account pool\n\n    private static let soulSignMaxAppsPerAccount = 3\n    private static let soulSignLastAssignedAccountKey = \"soulsign.accountPool.lastAssignedAccountID\"\n\n    private func soulSignAssignedAppCount(for accountID: UUID) -> Int {\n        installedApps.filter { app in\n            app.isSeal == false && app.accountID == accountID\n        }.count\n    }\n\n    private func soulSignAccountHasCapacity(_ account: AppleAccountRecord) -> Bool {\n        soulSignAssignedAppCount(for: account.id) < Self.soulSignMaxAppsPerAccount\n    }\n\n    private func soulSignRememberAssignedAccount(_ id: UUID) {\n        UserDefaults.standard.set(id.uuidString, forKey: Self.soulSignLastAssignedAccountKey)\n    }\n\n    private func soulSignAutomaticAccount(from availableAccounts: [AppleAccountRecord]) -> AppleAccountRecord? {\n        let accountsWithCapacity = availableAccounts.filter(soulSignAccountHasCapacity)\n        guard accountsWithCapacity.isEmpty == false else { return nil }\n\n        // First balance by current top-level app count. Among equally used accounts,\n        // continue after the previously assigned account to provide deterministic rotation.\n        let minimumCount = accountsWithCapacity\n            .map { soulSignAssignedAppCount(for: $0.id) }\n            .min() ?? 0\n        let leastUsedIDs = Set(accountsWithCapacity.filter {\n            soulSignAssignedAppCount(for: $0.id) == minimumCount\n        }.map(\\.id))\n\n        let lastID = UserDefaults.standard\n            .string(forKey: Self.soulSignLastAssignedAccountKey)\n            .flatMap(UUID.init(uuidString:))\n\n        if let lastID, let lastIndex = availableAccounts.firstIndex(where: { $0.id == lastID }) {\n            for offset in 1...availableAccounts.count {\n                let candidate = availableAccounts[(lastIndex + offset) % availableAccounts.count]\n                if leastUsedIDs.contains(candidate.id), soulSignAccountHasCapacity(candidate) {\n                    return candidate\n                }\n            }\n        }\n\n        return accountsWithCapacity.first(where: { leastUsedIDs.contains($0.id) })\n    }\n\n    private func soulSignCapacityFailure() -> ImportFailure {\n        ImportFailure(\n            title: \"Apple ID 配额已满\",\n            reason: \"当前所有可用 Apple ID 都已由 SoulSign 分配了 3 个 IPA。\",\n            recovery: \"添加新的 Apple ID，或移除不再使用的已签名应用\",\n            code: \"SOUL-POOL-003\"\n        )\n    }\n\n    private func continueSigningRequest(\n        for app: AppRecord,\n        availableAccounts: [AppleAccountRecord]\n    ) {\n        if app.belongsInInstalledList {\n            // Renewal never rotates an existing app to a different ID automatically.\n            guard let accountID = app.accountID,\n                  let account = availableAccounts.first(where: { $0.id == accountID }) else {\n                alertFailure = ImportFailure(\n                    title: \"签名账号不可用\",\n                    reason: \"上次签名这个应用的 Apple ID 已被删除或凭据失效。\",\n                    recovery: \"在「我的」中重新添加原 Apple ID，或手动选择账号重新签名安装\",\n                    code: \"SEAL-AUTH-104c\"\n                )\n                return\n            }\n            startSigning(app: app, account: account)\n            return\n        }\n\n        guard let account = soulSignAutomaticAccount(from: availableAccounts) else {\n            alertFailure = soulSignCapacityFailure()\n            return\n        }\n        soulSignRememberAssignedAccount(account.id)\n        Task { [weak self] in await self?.selectActiveAccount(id: account.id) }\n        startSigning(app: app, account: account)\n    }\n"""
     text = replace_once(text, old_block, new_block, "account-pool allocator")
 
-    # Enforce the 3-app policy even if another UI path passes a new app/account directly.
-    old_guard = """        guard let account = verifiedAccounts.first(where: { $0.id == resolvedAccountID }) else {\n            alertFailure = ImportFailure(\n"""
-    new_guard = """        guard let account = verifiedAccounts.first(where: { $0.id == resolvedAccountID }) else {\n            alertFailure = ImportFailure(\n"""
-    # We insert after the complete availability guard, not inside it.
-    availability_tail = """            return\n        }\n        if isRenewal == false {\n            await selectActiveAccount(id: account.id)\n        }\n"""
-    capacity_tail = """            return\n        }\n        if isRenewal == false, app.isSeal == false, soulSignAccountHasCapacity(account) == false {\n            alertFailure = soulSignCapacityFailure()\n            return\n        }\n        if isRenewal == false {\n            soulSignRememberAssignedAccount(account.id)\n            await selectActiveAccount(id: account.id)\n        }\n"""
-    text = replace_once(text, availability_tail, capacity_tail, "direct-sign capacity guard")
+    # Defense-in-depth: guard direct startSigning(...) entry when the current upstream
+    # exposes the expected helper. Do not bind this patch to a large surrounding block:
+    # MJorb has changed that async path in recent commits. The automatic allocator above
+    # remains the primary policy path even if this optional guard cannot be inserted.
+    start_guard = """        if app.belongsInInstalledList == false, app.isSeal == false, soulSignAccountHasCapacity(account) == false {
+            alertFailure = soulSignCapacityFailure()
+            return
+        }
+        if app.belongsInInstalledList == false {
+            soulSignRememberAssignedAccount(account.id)
+        }
+"""
+    start_re = re.compile(
+        r"(?m)^(?P<indent>\s*)(?:private\s+)?func\s+startSigning\(\s*app:\s*AppRecord,\s*account:\s*AppleAccountRecord\s*\)\s*\{\s*$"
+    )
+    start_match = start_re.search(text)
+    if start_match:
+        probe = text[start_match.end():start_match.end() + 1200]
+        if "soulSignAccountHasCapacity(account)" not in probe:
+            text = text[:start_match.end()] + "\n" + start_guard + text[start_match.end():]
+    else:
+        print(
+            "SoulSign patch warning: direct-sign capacity guard anchor not found; "
+            "continuing with account-pool allocator",
+            file=sys.stderr,
+        )
 
     # Manual account picker must also honor capacity for a new app.
     old_select = """    func selectAccount(_ account: AppleAccountRecord, for app: AppRecord) {\n        accountSelectionApp = nil\n        Task { [weak self] in\n"""
     new_select = """    func selectAccount(_ account: AppleAccountRecord, for app: AppRecord) {\n        if app.belongsInInstalledList == false, app.isSeal == false, soulSignAccountHasCapacity(account) == false {\n            accountSelectionApp = nil\n            alertFailure = soulSignCapacityFailure()\n            return\n        }\n        if app.belongsInInstalledList == false {\n            soulSignRememberAssignedAccount(account.id)\n        }\n        accountSelectionApp = nil\n        Task { [weak self] in\n"""
-    text = replace_once(text, old_select, new_select, "manual picker capacity guard")
+    if old_select in text:
+        text = text.replace(old_select, new_select, 1)
+    else:
+        print(
+            "SoulSign patch warning: manual picker capacity guard anchor not found; automatic allocator remains active",
+            file=sys.stderr,
+        )
 
     # Insert foreground/background renewal helpers immediately before the existing refreshAll.
     marker = """    func refreshAll() {\n        startBatchRefresh()\n    }\n"""

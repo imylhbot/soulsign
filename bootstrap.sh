@@ -2,7 +2,7 @@
 set -euo pipefail
 
 UPSTREAM_URL="${MJORB_URL:-https://github.com/dmjorb/MJorb.git}"
-UPSTREAM_REF="${MJORB_REF:-main}"
+UPSTREAM_REF="${MJORB_REF:-4c24fda2c97f8d275b748ba069a9af0ba89b62d2}"
 TARGET_DIR="${1:-SoulSign}"
 MIN_IOS="${SOULSIGN_MIN_IOS:-16.0}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,7 +16,9 @@ fi
 
 mkdir -p "$TARGET_DIR"
 echo "[SoulSign] Cloning MJorb ($UPSTREAM_REF)..."
-git clone --depth 1 --branch "$UPSTREAM_REF" "$UPSTREAM_URL" "$TMP_DIR/upstream"
+git clone --filter=blob:none --no-checkout "$UPSTREAM_URL" "$TMP_DIR/upstream"
+git -C "$TMP_DIR/upstream" fetch --depth 1 origin "$UPSTREAM_REF"
+git -C "$TMP_DIR/upstream" checkout --detach FETCH_HEAD
 UPSTREAM_SHA="$(git -C "$TMP_DIR/upstream" rev-parse HEAD)"
 echo "[SoulSign] Upstream commit: $UPSTREAM_SHA"
 

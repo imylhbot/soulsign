@@ -39,3 +39,7 @@ instead of the removed/nonexistent `overlay/.github/...` path.
 - SoulSign now patches only the main `targets -> Seal` block for app display name, URL scheme and BGTask Info.plist keys.
 - Generic source replacements tolerate duplicate matches by patching the first exact match and logging a warning.
 - Bootstrap prints the exact MJorb upstream commit SHA in Actions logs.
+
+## v5 build stability
+
+The default MJorb source is pinned to commit `4c24fda2c97f8d275b748ba069a9af0ba89b62d2`. This makes builds reproducible instead of silently following upstream `main`. The direct-sign capacity guard now patches by function entry and degrades to a warning if upstream renames that helper; the primary 3-app account-pool allocator remains active.
