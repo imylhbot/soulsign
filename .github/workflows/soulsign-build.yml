@@ -8,9 +8,9 @@ on:
         required: false
         type: string
       upstream_ref:
-        description: 'MJorb 分支或标签，默认 main'
+        description: 'MJorb 分支、标签或 commit；默认固定已验证 commit'
         required: false
-        default: 'main'
+        default: '4c24fda2c97f8d275b748ba069a9af0ba89b62d2'
         type: string
 
 concurrency:
