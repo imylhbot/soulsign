@@ -17,6 +17,8 @@ fi
 mkdir -p "$TARGET_DIR"
 echo "[SoulSign] Cloning MJorb ($UPSTREAM_REF)..."
 git clone --depth 1 --branch "$UPSTREAM_REF" "$UPSTREAM_URL" "$TMP_DIR/upstream"
+UPSTREAM_SHA="$(git -C "$TMP_DIR/upstream" rev-parse HEAD)"
+echo "[SoulSign] Upstream commit: $UPSTREAM_SHA"
 
 # Copy the complete upstream source so the resulting GitHub repository remains a
 # real source fork instead of a binary-only wrapper. Do not copy upstream .git.
@@ -47,6 +49,7 @@ SoulSign is based on MJorb/Seal.
 
 - Upstream: $UPSTREAM_URL
 - Bootstrap ref requested: $UPSTREAM_REF
+- Upstream commit: $UPSTREAM_SHA
 - SoulSign bootstrap generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 Keep the upstream copyright/license notices. MJorb is AGPL-3.0; if you distribute

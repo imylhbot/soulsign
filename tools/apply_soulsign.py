@@ -9,9 +9,88 @@ import sys
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
-    if count != 1:
-        raise RuntimeError(f"{label}: expected exactly 1 match, found {count}")
+    if count < 1:
+        raise RuntimeError(f"{label}: expected at least 1 match, found 0")
+    if count > 1:
+        print(
+            f"SoulSign patch warning: {label}: found {count} matches; patching the first one",
+            file=sys.stderr,
+        )
     return text.replace(old, new, 1)
+
+
+def _target_block_range(text: str, target_name: str) -> tuple[int, int]:
+    """Return the character range of a two-space-indented XcodeGen target block."""
+    header_re = re.compile(rf"(?m)^  {re.escape(target_name)}:\s*$")
+    match = header_re.search(text)
+    if not match:
+        raise RuntimeError(f"project.yml: target '{target_name}' not found")
+
+    start = match.start()
+    pos = match.end()
+    # A target ends at the next top-level key or sibling target. Nested target
+    # content is indented by >= 4 spaces, so <= 2 spaces marks the boundary.
+    boundary_re = re.compile(r"(?m)^(?:[^ \t\r\n][^\r\n]*|  [^ \t\r\n][^\r\n]*):\s*$")
+    boundary = boundary_re.search(text, pos)
+    end = boundary.start() if boundary else len(text)
+    return start, end
+
+
+def _patch_main_target(text: str) -> str:
+    start, end = _target_block_range(text, "Seal")
+    block = text[start:end]
+
+    # Only rename the main application target. MJorb currently contains another
+    # CFBundleDisplayName: Seal in a secondary target, so whole-file uniqueness
+    # is intentionally NOT required here.
+    if "CFBundleDisplayName: SoulSign" not in block:
+        count = block.count("CFBundleDisplayName: Seal")
+        if count < 1:
+            raise RuntimeError("display name: main Seal target has no CFBundleDisplayName: Seal")
+        block = block.replace("CFBundleDisplayName: Seal", "CFBundleDisplayName: SoulSign", 1)
+
+    block = block.replace(
+        "NSLocalNetworkUsageDescription: Seal 通过本地通道连接此设备并安装应用。",
+        "NSLocalNetworkUsageDescription: SoulSign 通过本地通道连接此设备并安装应用。",
+    )
+
+    # Keep existing URL schemes for compatibility and add SoulSign exactly once.
+    if re.search(r"(?m)^\s*- soulsign\s*$", block) is None:
+        block, n = re.subn(
+            r"(?m)^(\s*)- seal\s*$",
+            r"\1- soulsign\n\1- seal",
+            block,
+            count=1,
+        )
+        if n == 0:
+            print("SoulSign patch warning: main target URL scheme '- seal' not found; leaving schemes unchanged", file=sys.stderr)
+
+    # Add BackgroundTasks keys to the main target only. Do not depend on this
+    # property being globally unique because extensions can have the same key.
+    if "BGTaskSchedulerPermittedIdentifiers:" not in block:
+        marker_re = re.compile(r"(?m)^(\s*)ITSAppUsesNonExemptEncryption:\s*false\s*$")
+        marker = marker_re.search(block)
+        if not marker:
+            raise RuntimeError("Info.plist background task insertion: ITSAppUsesNonExemptEncryption not found in main Seal target")
+        indent = marker.group(1)
+        insertion = (
+            marker.group(0)
+            + "\n"
+            + indent + "BGTaskSchedulerPermittedIdentifiers:\n"
+            + indent + "  - com.soulsign.app.autorenew\n"
+            + indent + "UIBackgroundModes:\n"
+            + indent + "  - fetch"
+        )
+        block = block[:marker.start()] + insertion + block[marker.end():]
+    elif "UIBackgroundModes:" not in block:
+        # Extremely defensive fallback for partially patched trees.
+        bg_re = re.compile(r"(?m)^(\s*)BGTaskSchedulerPermittedIdentifiers:\s*$")
+        bg = bg_re.search(block)
+        if bg:
+            indent = bg.group(1)
+            block += f"\n{indent}UIBackgroundModes:\n{indent}  - fetch\n"
+
+    return text[:start] + block + text[end:]
 
 
 def patch_project(repo: pathlib.Path, minimum_ios: str) -> None:
@@ -19,29 +98,11 @@ def patch_project(repo: pathlib.Path, minimum_ios: str) -> None:
     text = path.read_text(encoding="utf-8")
 
     # Keep internal target/scheme names as Seal for upstream build-script compatibility.
-    text = replace_once(text, "CFBundleDisplayName: Seal", "CFBundleDisplayName: SoulSign", "display name")
+    text = _patch_main_target(text)
+
+    # Bundle IDs can legitimately appear in the app, extension and entitlement
+    # references; keep their relative suffixes while moving the namespace.
     text = text.replace("com.mjorb.seal", "com.soulsign.app")
-    text = text.replace("NSLocalNetworkUsageDescription: Seal 通过本地通道连接此设备并安装应用。",
-                        "NSLocalNetworkUsageDescription: SoulSign 通过本地通道连接此设备并安装应用。")
-
-    # Add SoulSign URL scheme while retaining sidestore compatibility.
-    text = text.replace(
-        "              - seal\n              - sidestore",
-        "              - soulsign\n              - seal\n              - sidestore",
-        1,
-    )
-
-    # BackgroundTasks configuration is needed for the best-effort renewal scheduler.
-    marker = "        ITSAppUsesNonExemptEncryption: false\n"
-    if "BGTaskSchedulerPermittedIdentifiers:" not in text:
-        insertion = (
-            marker
-            + "        BGTaskSchedulerPermittedIdentifiers:\n"
-            + "          - com.soulsign.app.autorenew\n"
-            + "        UIBackgroundModes:\n"
-            + "          - fetch\n"
-        )
-        text = replace_once(text, marker, insertion, "Info.plist background task insertion")
 
     # Upstream currently targets iOS 16. Lowering the deployment target is optional and
     # intentionally explicit because current AnisetteKit requires iOS 15 and the UI may

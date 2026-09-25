@@ -31,3 +31,11 @@ GitHub Actions 会自动：
 
 The bootstrap now copies the workflow from `.github/workflows/soulsign-build.yml`
 instead of the removed/nonexistent `overlay/.github/...` path.
+
+
+## v4 patch robustness
+
+- Fixes MJorb `project.yml` having more than one `CFBundleDisplayName: Seal`.
+- SoulSign now patches only the main `targets -> Seal` block for app display name, URL scheme and BGTask Info.plist keys.
+- Generic source replacements tolerate duplicate matches by patching the first exact match and logging a warning.
+- Bootstrap prints the exact MJorb upstream commit SHA in Actions logs.
