@@ -25,7 +25,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
-      SOULSIGN_SRC: ${{ runner.temp }}/SoulSign-src
+      SOULSIGN_SRC: /tmp/SoulSign-src
       MJORB_URL: https://github.com/dmjorb/MJorb.git
       MJORB_REF: ${{ inputs.upstream_ref }}
 
