@@ -20,7 +20,8 @@ git clone --depth 1 --branch "$UPSTREAM_REF" "$UPSTREAM_URL" "$TMP_DIR/upstream"
 
 # Copy the complete upstream source so the resulting GitHub repository remains a
 # real source fork instead of a binary-only wrapper. Do not copy upstream .git.
-rsync -a --exclude='.git' "$TMP_DIR/upstream/" "$TARGET_DIR/"
+cp -R "$TMP_DIR/upstream/." "$TARGET_DIR/"
+rm -rf "$TARGET_DIR/.git"
 
 mkdir -p "$TARGET_DIR/.soulsign-tools"
 cp "$SCRIPT_DIR/tools/apply_soulsign.py" "$TARGET_DIR/.soulsign-tools/"
