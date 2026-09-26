@@ -40,6 +40,7 @@ fi
 mkdir -p "$TARGET_DIR/.soulsign-tools"
 cp "$SCRIPT_DIR/tools/apply_soulsign.py" "$TARGET_DIR/.soulsign-tools/"
 cp "$SCRIPT_DIR/tools/install_icon.sh" "$TARGET_DIR/.soulsign-tools/"
+cp "$SCRIPT_DIR/tools/make_external_signer_ipa.sh" "$TARGET_DIR/.soulsign-tools/"
 mkdir -p "$TARGET_DIR/.github/workflows"
 if [[ ! -f "$SCRIPT_DIR/.github/workflows/soulsign-build.yml" ]]; then
   echo "error: missing SoulSign workflow: $SCRIPT_DIR/.github/workflows/soulsign-build.yml" >&2
