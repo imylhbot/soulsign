@@ -4,7 +4,7 @@ set -euo pipefail
 UPSTREAM_URL="${MJORB_URL:-https://github.com/dmjorb/MJorb.git}"
 UPSTREAM_REF="${MJORB_REF:-4c24fda2c97f8d275b748ba069a9af0ba89b62d2}"
 TARGET_DIR="${1:-SoulSign}"
-MIN_IOS="${SOULSIGN_MIN_IOS:-16.0}"
+MIN_IOS="${SOULSIGN_MIN_IOS:-15.0}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENDOR_DIR="${MJORB_VENDOR_DIR:-$SCRIPT_DIR/vendor/MJorb}"
 TMP_DIR="$(mktemp -d)"
@@ -41,6 +41,8 @@ mkdir -p "$TARGET_DIR/.soulsign-tools"
 cp "$SCRIPT_DIR/tools/apply_soulsign.py" "$TARGET_DIR/.soulsign-tools/"
 cp "$SCRIPT_DIR/tools/install_icon.sh" "$TARGET_DIR/.soulsign-tools/"
 cp "$SCRIPT_DIR/tools/make_external_signer_ipa.sh" "$TARGET_DIR/.soulsign-tools/"
+cp "$SCRIPT_DIR/tools/patch_auth_packages.py" "$TARGET_DIR/.soulsign-tools/"
+cp "$SCRIPT_DIR/tools/audit_auth_signing.sh" "$TARGET_DIR/.soulsign-tools/"
 mkdir -p "$TARGET_DIR/.github/workflows"
 if [[ ! -f "$SCRIPT_DIR/.github/workflows/soulsign-build.yml" ]]; then
   echo "error: missing SoulSign workflow: $SCRIPT_DIR/.github/workflows/soulsign-build.yml" >&2

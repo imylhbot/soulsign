@@ -1,27 +1,27 @@
-# SoulSign GitHub-ready v8
+# SoulSign GitHub-ready v10
 
-Upload the **contents of this folder** to `imylhbot/soulsign` and run **SoulSign Build & Release**.
+SoulSign v10 is based on the pinned MJorb/Seal source and focuses on Apple ID authentication/signing compatibility while keeping the existing SoulSign account-pool work.
 
-## v8 changes
+## v10 changes
 
-- Launch-stability reset: keeps MJorb's original bundle identifiers/entitlement namespace.
-- Removes SoulSign's launch-time `BGTaskScheduler` registration; foreground 24-hour renewal remains.
-- Adds `SoulSign-diagnostics.txt` to every build for crash/IPA inspection.
-- Adds `tools/make_ota_manifest.py` and OTA installation notes based on the local-IPA + HTTPS-manifest pattern.
-- Adds vendored-upstream support. On the first v8 run Actions downloads the pinned MJorb commit and attempts to commit a clean copy under `vendor/MJorb`; later builds use that local copy instead of cloning upstream again.
-- Rust/Cargo/RustBridge caches are retained and the workflow skips RustBridge rebuild when verification already passes.
+- Minimum deployment target: **iOS 15.0**.
+- Build-time patch for the known AltSign `s2k_fo` login regression.
+- Build-time normalization of outdated GSA `com.apple.dt.Xcode/...` client tokens to `com.apple.akd/1.0` in resolved auth packages.
+- Removes legacy console logging of returned Apple service tokens when that old AltSign code is present.
+- Explicit package-resolution step before compile, then patches the exact package source Xcode will build.
+- Keeps `SoulSign.ipa` as the complete app including `SealTunnel.appex`; `SoulSign-Lite.ipa` is also emitted for bootstrap/testing with third-party signers that cannot provision the NetworkExtension.
+- Keeps pinned MJorb source in `vendor/MJorb` after the first workflow run, so the entire upstream is not downloaded every build.
 
-## Important
+## Upload
 
-`SoulSign.ipa` produced by Actions is still an **unsigned** IPA. It must be signed with a profile valid for the device, including any nested extensions/entitlements, before installation. OTA manifest installation is only a transport for an already-signed IPA; it does not repair invalid signing.
+Upload/overwrite the contents of this directory into your `imylhbot/soulsign` repository, then run:
 
-If SoulSign still closes immediately after signing/installing, download `SoulSign-diagnostics.txt` from the same Release and export the iPhone crash `.ips` file from **Settings -> Privacy & Security -> Analytics & Improvements -> Analytics Data**. Those two files allow the next fix to target the actual exception/dylib/entitlement failure.
+**Actions → SoulSign Build & Release → Run workflow**
 
-## v9: 外部签名器兼容包
+The default upstream ref remains pinned to `4c24fda2c97f8d275b748ba069a9af0ba89b62d2`.
 
-Release 现在同时生成两个 IPA：
+See `docs/AUTH_SIGNING_FIXES.md` for the authentication/signing rationale.
 
-- `SoulSign.ipa`：默认推荐，移除 `SealTunnel.appex`，用于全能签一类只需要给主 App 重签的场景。
-- `SoulSign-Full.ipa`：保留 Tunnel Extension，仅用于能够同时给主 App、Extension 和对应 entitlement/provisioning profile 完整重签的安装链。
+## License
 
-如果之前是“安装成功，一点即退”，请优先测试 `SoulSign.ipa`。详见 `docs/EXTERNAL_SIGNING.md`。
+MJorb/Seal is AGPL-3.0. Keep its license/notices and publish corresponding source when distributing binaries as required by that license.
