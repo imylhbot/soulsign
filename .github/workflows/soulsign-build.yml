@@ -99,9 +99,20 @@ jobs:
             ~/.rustup/toolchains
             ~/.rustup/update-hashes
             /tmp/SoulSign-src/Vendor/Minimuxer/RustBridge/target
-          key: soulsign-rust-v8-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
+          key: soulsign-rust-v9-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
           restore-keys: |
-            soulsign-rust-v8-${{ runner.os }}-1.97.1-
+            soulsign-rust-v9-${{ runner.os }}-1.97.1-
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/org.swift.swiftpm
+            ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: soulsign-spm-v9-${{ runner.os }}-${{ inputs.upstream_ref }}
+          restore-keys: |
+            soulsign-spm-v9-${{ runner.os }}-
 
       - name: Ensure Rust toolchain
         shell: bash
@@ -165,10 +176,26 @@ jobs:
           set -euxo pipefail
           SEAL_IPA_CONFIGURATION=Release SEAL_SKIP_XCODEGEN=1 bash Scripts/build-unsigned-ipa.sh
           bash Scripts/verify-ipa.sh build/Seal.ipa
-          cp build/Seal.ipa build/SoulSign.ipa
+
+          # Preserve the complete upstream-compatible build for signing systems
+          # that support app extensions + NetworkExtension provisioning.
+          cp build/Seal.ipa build/SoulSign-Full.ipa
+
+          # Default SoulSign.ipa is optimized for generic on-device/external
+          # signers: remove the embedded SealTunnel extension so the signer only
+          # has to provision/sign the main application bundle.
+          bash .soulsign-tools/make_external_signer_ipa.sh \
+            build/SoulSign-Full.ipa build/SoulSign.ipa
+
+          bash Scripts/verify-ipa.sh build/SoulSign.ipa
           (cd build && shasum -a 256 SoulSign.ipa | awk '{print $1 "  SoulSign.ipa"}' > SoulSign.ipa.sha256)
-          du -h build/SoulSign.ipa
+          (cd build && shasum -a 256 SoulSign-Full.ipa | awk '{print $1 "  SoulSign-Full.ipa"}' > SoulSign-Full.ipa.sha256)
+
+          echo '===== IPA sizes ====='
+          du -h build/SoulSign.ipa build/SoulSign-Full.ipa
           stat -f 'SoulSign.ipa exact bytes: %z' build/SoulSign.ipa
+          stat -f 'SoulSign-Full.ipa exact bytes: %z' build/SoulSign-Full.ipa
+          echo '====================='
 
       - name: Inspect IPA for launch diagnostics
         shell: bash
@@ -206,7 +233,34 @@ jobs:
             echo "== Signature status (unsigned build is expected here) =="
             codesign -dvvv "$APP" 2>&1 || true
           } > "$DIAG"
+          echo >> "$DIAG"
+          echo "== External signer compatibility check ==" >> "$DIAG"
+          if find "$APP" -maxdepth 3 -name 'SealTunnel.appex' -print -quit | grep -q .; then
+            echo "ERROR: default SoulSign.ipa still contains SealTunnel.appex" >> "$DIAG"
+            exit 31
+          else
+            echo "OK: default SoulSign.ipa has no embedded SealTunnel.appex" >> "$DIAG"
+          fi
           cat "$DIAG"
+
+          FULL_DIAG="$GITHUB_WORKSPACE/out/SoulSign-Full-diagnostics.txt"
+          FULL_TMP="$RUNNER_TEMP/soulsign-full-ipa-check"
+          rm -rf "$FULL_TMP"
+          mkdir -p "$FULL_TMP"
+          ditto -x -k "$SOULSIGN_SRC/build/SoulSign-Full.ipa" "$FULL_TMP"
+          FULL_APP="$(find "$FULL_TMP/Payload" -maxdepth 1 -type d -name '*.app' | head -1)"
+          {
+            echo "SoulSign full-build diagnostics"
+            echo "run=${GITHUB_RUN_ID} upstream=${MJORB_REF}"
+            echo "app=$FULL_APP"
+            echo
+            echo "== Embedded extensions =="
+            find "$FULL_APP" -maxdepth 3 -name '*.appex' -print | sort
+            echo
+            echo "== Signature status =="
+            codesign -dvvv "$FULL_APP" 2>&1 || true
+          } > "$FULL_DIAG"
+          cat "$FULL_DIAG"
 
       - name: Prepare release files
         shell: bash
@@ -214,6 +268,8 @@ jobs:
           set -euxo pipefail
           cp "$SOULSIGN_SRC/build/SoulSign.ipa" "$GITHUB_WORKSPACE/out/"
           cp "$SOULSIGN_SRC/build/SoulSign.ipa.sha256" "$GITHUB_WORKSPACE/out/"
+          cp "$SOULSIGN_SRC/build/SoulSign-Full.ipa" "$GITHUB_WORKSPACE/out/"
+          cp "$SOULSIGN_SRC/build/SoulSign-Full.ipa.sha256" "$GITHUB_WORKSPACE/out/"
           du -h "$GITHUB_WORKSPACE/out/"* || true
 
       - name: Upload SoulSign IPA artifact
@@ -226,6 +282,9 @@ jobs:
             out/SoulSign.ipa
             out/SoulSign.ipa.sha256
             out/SoulSign-diagnostics.txt
+            out/SoulSign-Full.ipa
+            out/SoulSign-Full.ipa.sha256
+            out/SoulSign-Full-diagnostics.txt
           retention-days: 30
 
       - name: Resolve Release tag
@@ -249,6 +308,9 @@ jobs:
             out/SoulSign.ipa
             out/SoulSign.ipa.sha256
             out/SoulSign-diagnostics.txt
+            out/SoulSign-Full.ipa
+            out/SoulSign-Full.ipa.sha256
+            out/SoulSign-Full-diagnostics.txt
             out/SoulSign-source.zip
           )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
