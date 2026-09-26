@@ -16,11 +16,42 @@ known broken s2k_fo implementation is still present after patching.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
+import stat
 import sys
 
 TEXT_EXTS={'.swift','.m','.mm','.h','.hpp','.c','.cc','.cpp'}
+
+
+def ensure_writable(path: pathlib.Path) -> None:
+    """Make SwiftPM checkout files writable before patching.
+
+    Xcode/SwiftPM may restore SourcePackages from cache with source files mode 0444.
+    GitHub's macOS runner owns these files, so adding the user write bit is safe and
+    avoids PermissionError while keeping the package checkout otherwise unchanged.
+    """
+    try:
+        parent = path.parent
+        parent.chmod(parent.stat().st_mode | stat.S_IWUSR | stat.S_IXUSR)
+    except OSError:
+        pass
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    except OSError as exc:
+        raise PermissionError(f'cannot make package source writable: {path}: {exc}') from exc
+
+
+def write_text_safely(path: pathlib.Path, text: str) -> None:
+    ensure_writable(path)
+    try:
+        path.write_text(text, encoding='utf-8')
+        return
+    except PermissionError:
+        # One more explicit chmod in case a restored cache changed mode between scan/write.
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+        path.write_text(text, encoding='utf-8')
 
 
 def iter_sources(root: pathlib.Path):
@@ -79,7 +110,7 @@ def patch_file(path: pathlib.Path, text: str) -> tuple[str,list[str]]:
         changes.append('removed auth token logging')
 
     if text != original:
-        path.write_text(text, encoding='utf-8')
+        write_text_safely(path, text)
     return text,changes
 
 

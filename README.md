@@ -1,3 +1,7 @@
+# SoulSign GitHub Ready v11
+
+> v11 修复 SwiftPM `SourcePackages/checkouts` 只读权限导致的 `PermissionError`；Apple ID/GSA 补丁逻辑与 iOS 15.0 目标保持不变。
+
 # SoulSign GitHub-ready v10
 
 SoulSign v10 is based on the pinned MJorb/Seal source and focuses on Apple ID authentication/signing compatibility while keeping the existing SoulSign account-pool work.
