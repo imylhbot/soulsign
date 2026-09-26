@@ -58,6 +58,7 @@ jobs:
         shell: bash
         env:
           MJORB_VENDOR_DIR: ${{ github.workspace }}/vendor/MJorb
+          SOULSIGN_MIN_IOS: '15.0'
         run: |
           set -euxo pipefail
           rm -rf "$SOULSIGN_SRC"
@@ -99,9 +100,9 @@ jobs:
             ~/.rustup/toolchains
             ~/.rustup/update-hashes
             /tmp/SoulSign-src/Vendor/Minimuxer/RustBridge/target
-          key: soulsign-rust-v9-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
+          key: soulsign-rust-v10-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
           restore-keys: |
-            soulsign-rust-v9-${{ runner.os }}-1.97.1-
+            soulsign-rust-v10-${{ runner.os }}-1.97.1-
 
       - name: Restore SwiftPM cache
         uses: actions/cache@v4
@@ -110,9 +111,9 @@ jobs:
             ~/Library/Caches/org.swift.swiftpm
             ~/Library/org.swift.swiftpm
             ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
-          key: soulsign-spm-v9-${{ runner.os }}-${{ inputs.upstream_ref }}
+          key: soulsign-spm-v10-${{ runner.os }}-${{ inputs.upstream_ref }}
           restore-keys: |
-            soulsign-spm-v9-${{ runner.os }}-
+            soulsign-spm-v10-${{ runner.os }}-
 
       - name: Ensure Rust toolchain
         shell: bash
@@ -169,6 +170,23 @@ jobs:
           set -euxo pipefail
           xcodegen generate
 
+      - name: Resolve Swift packages
+        shell: bash
+        working-directory: ${{ env.SOULSIGN_SRC }}
+        run: |
+          set -euxo pipefail
+          xcodebuild -resolvePackageDependencies -project Seal.xcodeproj -scheme Seal
+
+      - name: Patch Apple ID authentication packages
+        shell: bash
+        working-directory: ${{ env.SOULSIGN_SRC }}
+        run: |
+          set -euxo pipefail
+          python3 .soulsign-tools/patch_auth_packages.py \
+            --root "$HOME/Library/Developer/Xcode/DerivedData" \
+            --root "$PWD"
+          bash .soulsign-tools/audit_auth_signing.sh "$PWD"
+
       - name: Build unsigned SoulSign IPA
         shell: bash
         working-directory: ${{ env.SOULSIGN_SRC }}
@@ -177,24 +195,26 @@ jobs:
           SEAL_IPA_CONFIGURATION=Release SEAL_SKIP_XCODEGEN=1 bash Scripts/build-unsigned-ipa.sh
           bash Scripts/verify-ipa.sh build/Seal.ipa
 
-          # Preserve the complete upstream-compatible build for signing systems
-          # that support app extensions + NetworkExtension provisioning.
-          cp build/Seal.ipa build/SoulSign-Full.ipa
+          # SoulSign.ipa keeps the complete upstream app/extension layout because
+          # the in-app signing/install path needs the tunnel and must provision/sign
+          # nested code bundles correctly.
+          cp build/Seal.ipa build/SoulSign.ipa
 
-          # Default SoulSign.ipa is optimized for generic on-device/external
-          # signers: remove the embedded SealTunnel extension so the signer only
-          # has to provision/sign the main application bundle.
+          # Lite is only for bootstrap signers that cannot provision an embedded
+          # NetworkExtension. It can be useful for testing login/signing UI, but it
+          # does not replace the complete install path.
           bash .soulsign-tools/make_external_signer_ipa.sh \
-            build/SoulSign-Full.ipa build/SoulSign.ipa
+            build/SoulSign.ipa build/SoulSign-Lite.ipa
 
           bash Scripts/verify-ipa.sh build/SoulSign.ipa
+          bash Scripts/verify-ipa.sh build/SoulSign-Lite.ipa
           (cd build && shasum -a 256 SoulSign.ipa | awk '{print $1 "  SoulSign.ipa"}' > SoulSign.ipa.sha256)
-          (cd build && shasum -a 256 SoulSign-Full.ipa | awk '{print $1 "  SoulSign-Full.ipa"}' > SoulSign-Full.ipa.sha256)
+          (cd build && shasum -a 256 SoulSign-Lite.ipa | awk '{print $1 "  SoulSign-Lite.ipa"}' > SoulSign-Lite.ipa.sha256)
 
           echo '===== IPA sizes ====='
-          du -h build/SoulSign.ipa build/SoulSign-Full.ipa
+          du -h build/SoulSign.ipa build/SoulSign-Lite.ipa
           stat -f 'SoulSign.ipa exact bytes: %z' build/SoulSign.ipa
-          stat -f 'SoulSign-Full.ipa exact bytes: %z' build/SoulSign-Full.ipa
+          stat -f 'SoulSign-Lite.ipa exact bytes: %z' build/SoulSign-Lite.ipa
           echo '====================='
 
       - name: Inspect IPA for launch diagnostics
@@ -234,27 +254,27 @@ jobs:
             codesign -dvvv "$APP" 2>&1 || true
           } > "$DIAG"
           echo >> "$DIAG"
-          echo "== External signer compatibility check ==" >> "$DIAG"
+          echo "== Full signing/install layout check ==" >> "$DIAG"
           if find "$APP" -maxdepth 3 -name 'SealTunnel.appex' -print -quit | grep -q .; then
-            echo "ERROR: default SoulSign.ipa still contains SealTunnel.appex" >> "$DIAG"
-            exit 31
+            echo "OK: SoulSign.ipa keeps SealTunnel.appex for the complete install path" >> "$DIAG"
           else
-            echo "OK: default SoulSign.ipa has no embedded SealTunnel.appex" >> "$DIAG"
+            echo "ERROR: SoulSign.ipa is missing SealTunnel.appex" >> "$DIAG"
+            exit 31
           fi
           cat "$DIAG"
 
-          FULL_DIAG="$GITHUB_WORKSPACE/out/SoulSign-Full-diagnostics.txt"
-          FULL_TMP="$RUNNER_TEMP/soulsign-full-ipa-check"
+          FULL_DIAG="$GITHUB_WORKSPACE/out/SoulSign-Lite-diagnostics.txt"
+          FULL_TMP="$RUNNER_TEMP/soulsign-lite-ipa-check"
           rm -rf "$FULL_TMP"
           mkdir -p "$FULL_TMP"
-          ditto -x -k "$SOULSIGN_SRC/build/SoulSign-Full.ipa" "$FULL_TMP"
+          ditto -x -k "$SOULSIGN_SRC/build/SoulSign-Lite.ipa" "$FULL_TMP"
           FULL_APP="$(find "$FULL_TMP/Payload" -maxdepth 1 -type d -name '*.app' | head -1)"
           {
-            echo "SoulSign full-build diagnostics"
+            echo "SoulSign Lite bootstrap-build diagnostics"
             echo "run=${GITHUB_RUN_ID} upstream=${MJORB_REF}"
             echo "app=$FULL_APP"
             echo
-            echo "== Embedded extensions =="
+            echo "== Embedded extensions (Lite should be empty) =="
             find "$FULL_APP" -maxdepth 3 -name '*.appex' -print | sort
             echo
             echo "== Signature status =="
@@ -268,8 +288,8 @@ jobs:
           set -euxo pipefail
           cp "$SOULSIGN_SRC/build/SoulSign.ipa" "$GITHUB_WORKSPACE/out/"
           cp "$SOULSIGN_SRC/build/SoulSign.ipa.sha256" "$GITHUB_WORKSPACE/out/"
-          cp "$SOULSIGN_SRC/build/SoulSign-Full.ipa" "$GITHUB_WORKSPACE/out/"
-          cp "$SOULSIGN_SRC/build/SoulSign-Full.ipa.sha256" "$GITHUB_WORKSPACE/out/"
+          cp "$SOULSIGN_SRC/build/SoulSign-Lite.ipa" "$GITHUB_WORKSPACE/out/"
+          cp "$SOULSIGN_SRC/build/SoulSign-Lite.ipa.sha256" "$GITHUB_WORKSPACE/out/"
           du -h "$GITHUB_WORKSPACE/out/"* || true
 
       - name: Upload SoulSign IPA artifact
@@ -282,9 +302,9 @@ jobs:
             out/SoulSign.ipa
             out/SoulSign.ipa.sha256
             out/SoulSign-diagnostics.txt
-            out/SoulSign-Full.ipa
-            out/SoulSign-Full.ipa.sha256
-            out/SoulSign-Full-diagnostics.txt
+            out/SoulSign-Lite.ipa
+            out/SoulSign-Lite.ipa.sha256
+            out/SoulSign-Lite-diagnostics.txt
           retention-days: 30
 
       - name: Resolve Release tag
@@ -308,9 +328,9 @@ jobs:
             out/SoulSign.ipa
             out/SoulSign.ipa.sha256
             out/SoulSign-diagnostics.txt
-            out/SoulSign-Full.ipa
-            out/SoulSign-Full.ipa.sha256
-            out/SoulSign-Full-diagnostics.txt
+            out/SoulSign-Lite.ipa
+            out/SoulSign-Lite.ipa.sha256
+            out/SoulSign-Lite-diagnostics.txt
             out/SoulSign-source.zip
           )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
