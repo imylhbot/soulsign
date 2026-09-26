@@ -65,30 +65,11 @@ def _patch_main_target(text: str) -> str:
         if n == 0:
             print("SoulSign patch warning: main target URL scheme '- seal' not found; leaving schemes unchanged", file=sys.stderr)
 
-    # Add BackgroundTasks keys to the main target only. Do not depend on this
-    # property being globally unique because extensions can have the same key.
-    if "BGTaskSchedulerPermittedIdentifiers:" not in block:
-        marker_re = re.compile(r"(?m)^(\s*)ITSAppUsesNonExemptEncryption:\s*false\s*$")
-        marker = marker_re.search(block)
-        if not marker:
-            raise RuntimeError("Info.plist background task insertion: ITSAppUsesNonExemptEncryption not found in main Seal target")
-        indent = marker.group(1)
-        insertion = (
-            marker.group(0)
-            + "\n"
-            + indent + "BGTaskSchedulerPermittedIdentifiers:\n"
-            + indent + "  - com.soulsign.app.autorenew\n"
-            + indent + "UIBackgroundModes:\n"
-            + indent + "  - fetch"
-        )
-        block = block[:marker.start()] + insertion + block[marker.end():]
-    elif "UIBackgroundModes:" not in block:
-        # Extremely defensive fallback for partially patched trees.
-        bg_re = re.compile(r"(?m)^(\s*)BGTaskSchedulerPermittedIdentifiers:\s*$")
-        bg = bg_re.search(block)
-        if bg:
-            indent = bg.group(1)
-            block += f"\n{indent}UIBackgroundModes:\n{indent}  - fetch\n"
+    # v8 stability: do not add BGTaskScheduler keys during bootstrap.
+    # Sideload/resign tools may rewrite the main bundle identifier, while a static
+    # BGTask identifier remains unchanged. Keep automatic renewal in the foreground
+    # until the bootstrap/signing path is proven stable on the target device.
+
 
     return text[:start] + block + text[end:]
 
@@ -100,9 +81,10 @@ def patch_project(repo: pathlib.Path, minimum_ios: str) -> None:
     # Keep internal target/scheme names as Seal for upstream build-script compatibility.
     text = _patch_main_target(text)
 
-    # Bundle IDs can legitimately appear in the app, extension and entitlement
-    # references; keep their relative suffixes while moving the namespace.
-    text = text.replace("com.mjorb.seal", "com.soulsign.app")
+    # Keep upstream bundle identifiers and entitlement namespaces intact in v8.
+    # Changing only project.yml identifiers while source/entitlement assumptions stay
+    # upstream-compatible can make a re-signed app launch and immediately terminate.
+    # SoulSign branding is therefore display-name/UI only for the stable bootstrap.
 
     # Upstream currently targets iOS 16. Lowering the deployment target is optional and
     # intentionally explicit because current AnisetteKit requires iOS 15 and the UI may
@@ -179,29 +161,12 @@ def patch_apps_view_model(repo: pathlib.Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def patch_app_entry(repo: pathlib.Path) -> None:
-    path = repo / "Seal/App/SealApp.swift"
-    text = path.read_text(encoding="utf-8")
-
-    text = replace_once(text, "import SwiftUI\n", "import SwiftUI\nimport BackgroundTasks\n", "BackgroundTasks import")
-    text = replace_once(
-        text,
-        "    private let notificationPresenter: SealNotificationPresenter\n",
-        "    private let notificationPresenter: SealNotificationPresenter\n    private let soulSignBackgroundRenewal: SoulSignBackgroundRenewal\n",
-        "background renewal property",
-    )
-    old_init = """        self.notificationPresenter = notificationPresenter\n        container = AppContainer.live()\n    }\n"""
-    new_init = """        self.notificationPresenter = notificationPresenter\n        let container = AppContainer.live()\n        self.container = container\n\n        let backgroundRenewal = SoulSignBackgroundRenewal(appsViewModel: container.appsViewModel)\n        self.soulSignBackgroundRenewal = backgroundRenewal\n        backgroundRenewal.register()\n        backgroundRenewal.schedule()\n    }\n"""
-    text = replace_once(text, old_init, new_init, "background renewal init")
-    path.write_text(text, encoding="utf-8")
-
-
 def patch_readme(repo: pathlib.Path) -> None:
     path = repo / "README.md"
     if not path.exists():
         return
     text = path.read_text(encoding="utf-8")
-    banner = """> **SoulSign fork** — this repository is derived from MJorb/Seal (AGPL-3.0). SoulSign adds Apple-ID pooling (3 user IPAs per ID), automatic account rotation, 24-hour expiry renewal policy, background refresh scheduling, and SoulSign branding. Upstream notices are retained below.\n\n"""
+    banner = """> **SoulSign fork** — this repository is derived from MJorb/Seal (AGPL-3.0). SoulSign adds Apple-ID pooling (3 user IPAs per ID), automatic account rotation, 24-hour expiry renewal policy, foreground 24-hour renewal checks, and SoulSign branding. Upstream notices are retained below.\n\n"""
     if not text.startswith("> **SoulSign fork**"):
         text = banner + text
     path.write_text(text, encoding="utf-8")
@@ -220,7 +185,6 @@ def main() -> int:
 
     patch_project(repo, args.minimum_ios)
     patch_apps_view_model(repo)
-    patch_app_entry(repo)
     patch_readme(repo)
     print("SoulSign patch applied successfully")
     return 0

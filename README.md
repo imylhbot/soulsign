@@ -1,50 +1,18 @@
-# SoulSign — GitHub 直接上传版
+# SoulSign GitHub-ready v8
 
-这个仓库版本**不需要在 Windows 本地运行 `bootstrap.sh`**。
+Upload the **contents of this folder** to `imylhbot/soulsign` and run **SoulSign Build & Release**.
 
-## 使用方法
+## v8 changes
 
-1. 把本 ZIP 解压后的**所有内容**上传/覆盖到你的 GitHub 仓库根目录。
-2. 可选：把你设计好的 `soulsign.png` 放到仓库根目录（建议 1024×1024 PNG）。
-3. 进入 GitHub 仓库 **Actions → SoulSign Build & Release → Run workflow**。
-4. `release_tag` 留空：只生成 Actions Artifact。
-5. `release_tag` 填 `v0.1.0` 之类：同时发布到 GitHub Releases。
+- Launch-stability reset: keeps MJorb's original bundle identifiers/entitlement namespace.
+- Removes SoulSign's launch-time `BGTaskScheduler` registration; foreground 24-hour renewal remains.
+- Adds `SoulSign-diagnostics.txt` to every build for crash/IPA inspection.
+- Adds `tools/make_ota_manifest.py` and OTA installation notes based on the local-IPA + HTTPS-manifest pattern.
+- Adds vendored-upstream support. On the first v8 run Actions downloads the pinned MJorb commit and attempts to commit a clean copy under `vendor/MJorb`; later builds use that local copy instead of cloning upstream again.
+- Rust/Cargo/RustBridge caches are retained and the workflow skips RustBridge rebuild when verification already passes.
 
-GitHub Actions 会自动：
+## Important
 
-- 拉取 `dmjorb/MJorb` 完整源码；
-- 应用 SoulSign 修改；
-- 检查/构建 RustBridge；
-- 应用 `soulsign.png`；
-- 生成 Xcode 工程；
-- 编译 `SoulSign.ipa`；
-- 输出 SHA-256；
-- 同时打包生成后的完整源码 `SoulSign-source.zip`。
+`SoulSign.ipa` produced by Actions is still an **unsigned** IPA. It must be signed with a profile valid for the device, including any nested extensions/entitlements, before installation. OTA manifest installation is only a transport for an already-signed IPA; it does not repair invalid signing.
 
-因此不会再出现“因为你 Windows 没有 bash，所以无法生成完整仓库”的问题。
-
-## 注意
-
-如果 Actions 在第一步 `git clone https://github.com/dmjorb/MJorb.git` 报错，说明上游仓库地址、访问权限或分支发生变化；这和 Windows Git/bash 无关。
-
-## v3 bootstrap fix
-
-The bootstrap now copies the workflow from `.github/workflows/soulsign-build.yml`
-instead of the removed/nonexistent `overlay/.github/...` path.
-
-
-## v4 patch robustness
-
-- Fixes MJorb `project.yml` having more than one `CFBundleDisplayName: Seal`.
-- SoulSign now patches only the main `targets -> Seal` block for app display name, URL scheme and BGTask Info.plist keys.
-- Generic source replacements tolerate duplicate matches by patching the first exact match and logging a warning.
-- Bootstrap prints the exact MJorb upstream commit SHA in Actions logs.
-
-## v5 build stability
-
-The default MJorb source is pinned to commit `4c24fda2c97f8d275b748ba069a9af0ba89b62d2`. This makes builds reproducible instead of silently following upstream `main`. The direct-sign capacity guard now patches by function entry and degrades to a warning if upstream renames that helper; the primary 3-app account-pool allocator remains active.
-
-
-## v6 修复
-- 修复 macOS 系统 Bash 3.2 不支持 `declare -A` 关联数组导致的 `icon: unbound variable`。
-- 图标生成脚本现兼容 Bash 3.2；没有 `soulsign.png` 时会安全跳过。
+If SoulSign still closes immediately after signing/installing, download `SoulSign-diagnostics.txt` from the same Release and export the iPhone crash `.ips` file from **Settings -> Privacy & Security -> Analytics & Improvements -> Analytics Data**. Those two files allow the next fix to target the actual exception/dylib/entitlement failure.
