@@ -100,9 +100,9 @@ jobs:
             ~/.rustup/toolchains
             ~/.rustup/update-hashes
             /tmp/SoulSign-src/Vendor/Minimuxer/RustBridge/target
-          key: soulsign-rust-v10-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
+          key: soulsign-rust-v11-${{ runner.os }}-1.97.1-${{ inputs.upstream_ref }}
           restore-keys: |
-            soulsign-rust-v10-${{ runner.os }}-1.97.1-
+            soulsign-rust-v11-${{ runner.os }}-1.97.1-
 
       - name: Restore SwiftPM cache
         uses: actions/cache@v4
@@ -111,9 +111,9 @@ jobs:
             ~/Library/Caches/org.swift.swiftpm
             ~/Library/org.swift.swiftpm
             ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
-          key: soulsign-spm-v10-${{ runner.os }}-${{ inputs.upstream_ref }}
+          key: soulsign-spm-v11-${{ runner.os }}-${{ inputs.upstream_ref }}
           restore-keys: |
-            soulsign-spm-v10-${{ runner.os }}-
+            soulsign-spm-v11-${{ runner.os }}-
 
       - name: Ensure Rust toolchain
         shell: bash
@@ -182,6 +182,16 @@ jobs:
         working-directory: ${{ env.SOULSIGN_SRC }}
         run: |
           set -euxo pipefail
+
+          # SwiftPM commonly restores SourcePackages source files as read-only (0444),
+          # especially when they came from actions/cache. Make only the checkout tree
+          # writable before applying the current Apple-auth compatibility fixes.
+          CHECKOUTS="$HOME/Library/Developer/Xcode/DerivedData"
+          if [ -d "$CHECKOUTS" ]; then
+            find "$CHECKOUTS" -type d -path '*/SourcePackages/checkouts*' -exec chmod u+rwx {} + 2>/dev/null || true
+            find "$CHECKOUTS" -type f -path '*/SourcePackages/checkouts/*' -exec chmod u+rw {} + 2>/dev/null || true
+          fi
+
           python3 .soulsign-tools/patch_auth_packages.py \
             --root "$HOME/Library/Developer/Xcode/DerivedData" \
             --root "$PWD"
