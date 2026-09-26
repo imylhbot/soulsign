@@ -1,0 +1,30 @@
+.worktrees/
+.DS_Store
+DerivedData/
+build/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+Seal.xcodeproj/
+.swiftpm/
+.build/
+.vendor-cache/
+dist/
+Vendor/Build/
+*.p12
+*.mobileprovision
+Auth.json
+PairingFile.plist
+*.pairing
+*.log
+__pycache__/
+*.py[cod]
+
+# Build artifacts & logs
+build*.txt
+build_logs_*/
+artifacts*.json
+*.ipa
+
+# AI dev workspace (forks, temp assets, screenshots)
+.dev-workspace/

@@ -1,0 +1,130 @@
+name: iOS Fast IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rebuild_rustbridge:
+        description: Rebuild RustBridge before packaging
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: ios-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast-ipa:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Cache Swift Package Manager dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/Developer/Xcode/DerivedData/Seal-*/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Cache Rust toolchain and cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.cargo/registry
+            ~/.cargo/git
+            Vendor/Minimuxer/RustBridge/target
+          key: rustbridge-${{ runner.os }}-${{ hashFiles('Vendor/Minimuxer/RustBridge/Cargo.lock') }}
+          restore-keys: |
+            rustbridge-${{ runner.os }}-
+
+      - name: Cache DerivedData for incremental builds
+        uses: actions/cache@v4
+        with:
+          path: build/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: |
+            deriveddata-${{ runner.os }}-
+
+      - name: Select pinned Xcode 26.5
+        run: |
+          test -d /Applications/Xcode_26.5.app
+          sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
+          xcodebuild -version
+          test "$(xcodebuild -version | head -n 1)" = "Xcode 26.5"
+
+      - name: Install pinned XcodeGen
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.45.4/xcodegen.zip
+          echo "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
+
+      - name: Ensure RustBridge matches Rust source
+        env:
+          RUST_TOOLCHAIN: 1.97.1
+        run: bash Scripts/ensure-rustbridge.sh
+
+      - name: Verify vendored RustBridge is present
+        run: |
+          test -f Vendor/Minimuxer/RustBridge/lib/RustBridge.xcframework/ios-arm64/librust_bridge.a
+          test -f Vendor/Minimuxer/RustBridge/lib/RustBridge.xcframework/ios-arm64-simulator/librust_bridge.a
+          xcrun nm -gU Vendor/Minimuxer/RustBridge/lib/RustBridge.xcframework/ios-arm64/librust_bridge.a | grep -q "_rust_bridge_idevice_lookup_app"
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Verify Seal minimum deployment target remains iOS 16
+        run: |
+          TARGET="$(xcodebuild \
+            -project Seal.xcodeproj \
+            -target Seal \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -showBuildSettings | awk -F ' = ' '/^[[:space:]]*IPHONEOS_DEPLOYMENT_TARGET = / { print $2; exit }')"
+          echo "Seal IPHONEOS_DEPLOYMENT_TARGET=$TARGET"
+          test "$TARGET" = "16.0"
+
+      - name: Verify SealTunnel target and Packet Tunnel configuration
+        run: |
+          TARGET="$(xcodebuild \
+            -project Seal.xcodeproj \
+            -target SealTunnel \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -showBuildSettings | awk -F ' = ' '/^[[:space:]]*IPHONEOS_DEPLOYMENT_TARGET = / { print $2; exit }')"
+          echo "SealTunnel IPHONEOS_DEPLOYMENT_TARGET=$TARGET"
+          test "$TARGET" = "16.0"
+          POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' SealTunnel/Info.plist)"
+          test "$POINT" = "com.apple.networkextension.packet-tunnel"
+          grep -q "packet-tunnel-provider" SealTunnel/SealTunnel.entitlements
+          grep -q "packet-tunnel-provider" Seal/Resources/Seal.entitlements
+
+      - name: Build fast unsigned IPA
+        run: SEAL_IPA_CONFIGURATION=Debug SEAL_SKIP_XCODEGEN=1 bash Scripts/build-unsigned-ipa.sh
+
+      - name: Verify unsigned IPA
+        run: bash Scripts/verify-ipa.sh build/Seal.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: Seal-${{ github.run_number }}
+          if-no-files-found: error
+          path: build/Seal.ipa
+          retention-days: 14
